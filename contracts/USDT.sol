@@ -9,4 +9,8 @@ contract USDT is ERC20 {
   function mint(address _to, uint256 _number) external {
     _mint(_to, 10**18 * _number);
   }
+
+  function decimals() public view virtual override returns (uint8) {
+    return 6;
+  }
 }

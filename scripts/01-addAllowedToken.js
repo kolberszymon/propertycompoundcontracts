@@ -2,8 +2,8 @@ const { ethers } = require("hardhat");
 
 const allowedInvestments = [
   {
-    tokenAddress: "0x6c3e1fb1D2449dAa1Ed04BE1a56F135b358C04d6",
-    duration: 365,
+    tokenAddress: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+    duration: 10,
     interestRate: 14,
   },
 ];
@@ -13,7 +13,7 @@ async function main() {
 
   let defi = await ethers.getContractAt(
     "DeFiPure",
-    "0x1a81Ba1230eE926845429725FaF39d39fc34439D",
+    "0x5FbDB2315678afecb367f032d93F642f64180aa3",
     deployer
   );
 
@@ -23,7 +23,7 @@ async function main() {
       investment.duration,
       investment.interestRate
     );
-    console.log("Token allowed: ", investment.tokenAddress);
+    console.log("Investment added: ", investment.tokenAddress);
   }
 }
 

@@ -1,18 +1,19 @@
 const { deployments, ethers, getNamedAccounts } = require("hardhat");
 const { assert, expect } = require("chai");
+const { BigNumber } = require("ethers");
 
 describe("Defi", async function () {
   let deployer;
-  // let addr1;
+  let notOwner;
   let defi;
   let dai;
-  let dai1;
-  let stakingAmount = 10000;
-  let pLend;
-  let pBorrow;
+  let usdt;
+  let stakingAmount;
 
   beforeEach(async function () {
-    [deployer] = await ethers.getSigners();
+    stakingAmount = ethers.utils.parseEther("10000");
+
+    [deployer, notOwner] = await ethers.getSigners();
 
     // Creating DeFi contract
     const DEFI = await ethers.getContractFactory("DeFiPure", deployer);
@@ -25,25 +26,26 @@ describe("Defi", async function () {
     dai = await DAI.deploy();
     await dai.deployed();
     dai.connect(deployer);
-    await dai.mint(deployer.address, 1000);
 
-    dai1 = await DAI.deploy();
-    await dai1.deployed();
+    await dai.mint(deployer.address, stakingAmount);
 
-    await defi.addAllowedInvestment(dai.address, 365, 16);
-    await dai.approve(defi.address, 100000);
+    usdt = await DAI.deploy();
+    await usdt.deployed();
+
+    await defi.addAvailableInvestment(dai.address, 365, 10);
+    await dai.approve(defi.address, stakingAmount);
   });
 
   describe("staking", async function () {
-    it("doesn't allow for staking not allowed token", async function () {
-      await expect(defi.stake(10000, 2)).to.be.revertedWith(
-        "Token not allowed"
+    it("doesn't allow for staking not existent investment", async function () {
+      await expect(defi.stake(stakingAmount, 2)).to.be.revertedWith(
+        "Investment doesn't exist"
       );
     });
 
     it("reverts not enough allowance", async () => {
-      await defi.addAllowedInvestment(dai1.address, 365, 16);
-      await expect(defi.stake(10000, 0)).to.be.revertedWith(
+      await defi.addAvailableInvestment(usdt.address, 365, 16);
+      await expect(defi.stake(100000, 1)).to.be.revertedWith(
         "Not enough allowance"
       );
     });
@@ -51,54 +53,129 @@ describe("Defi", async function () {
     it("can stake", async () => {
       await defi.stake(stakingAmount, 0);
       const balance = await dai.balanceOf(defi.address);
-      const { staker, amount } = await defi.stakers(deployer.address, 0);
+      const { staker, amount } = await defi.investments(deployer.address, 0);
 
-      assert.equal(balance, stakingAmount);
+      assert.equal(balance.toString(), stakingAmount);
       assert.equal(staker, deployer.address);
-      assert.equal(amount, stakingAmount);
+      assert.equal(amount.toString(), stakingAmount);
     });
 
     it("revert redeemStake before the time is up", async () => {
       await defi.stake(stakingAmount, 0);
       await expect(defi.redeemStake(0)).to.be.revertedWith(
-        "Staking is still locked"
+        "Investment is still locked"
       );
     });
 
-    it("properly redeemstake", async () => {
-      await defi.stake(stakingAmount, 0);
+    it("properly redeemstake whole stake", async () => {
+      // Mint for not owner
+      await dai.mint(notOwner.address, 10000);
+      await dai.connect(notOwner).approve(defi.address, stakingAmount);
+
+      // Initial balance
+      const initialBalance = await dai.balanceOf(notOwner.address);
+
+      // Stake
+      await defi.connect(notOwner).stake(stakingAmount, 0);
+
+      // Mint, so there will be enough funds in defi
+      await dai.mint(defi.address, 10000);
+
+      // Jump one year ahead
       await network.provider.send("evm_increaseTime", [31536000]);
 
-      await defi.redeemStake(0);
+      // Redeem stake
+      await defi.connect(notOwner).redeemStake(0);
 
-      let before_staked = await defi.getStaking(deployer.address, 0);
+      // After balance
+      let afterBalance = await dai.balanceOf(notOwner.address);
 
-      // Redeemed all available funds but still has some back
-      assert.equal(before_staked.paidBack, stakingAmount);
-
-      await dai.mint(defi.address, 1);
-
-      let before_balanceOfContract = await dai.balanceOf(defi.address);
-
-      await defi.redeemStake(0);
-
-      let after_staked = await defi.getStaking(deployer.address, 0);
-
-      // Stake has been deleted
-      assert.equal(after_staked.startDate, 0);
-
-      let after_balanceOfContract = await dai.balanceOf(defi.address);
-
-      // It only took remaining tokens
-      assert.equal(after_balanceOfContract, before_balanceOfContract - 1600);
+      assert.equal(
+        initialBalance
+          .mul(100 + 10)
+          .div(100)
+          .eq(afterBalance),
+        true
+      );
     });
   });
 
   describe("borrowing", async () => {
-    it("properly creates a loan", async () => {});
+    describe("properly creates a loan", async () => {
+      it("owner can create a loan", async () => {
+        await defi.createLoan(
+          notOwner.address,
+          stakingAmount,
+          365,
+          10,
+          dai.address
+        );
 
-    it("properly redeem a loan", async () => {});
+        const { amount, interestRate, amountRepaid } = await defi.getLoan(
+          notOwner.address,
+          0
+        );
 
-    it("properly repay a loan", async () => {});
+        assert.equal(amount.eq(stakingAmount), true);
+        assert.equal(interestRate.toString(), "10");
+        assert.equal(amountRepaid.toString(), "0");
+      });
+
+      it("not owner can't create a loan", async () => {
+        await expect(
+          defi
+            .connect(notOwner)
+            .createLoan(notOwner.address, 1000, 365, 10, dai.address)
+        ).to.be.revertedWith("Ownable: caller is not the owner");
+      });
+    });
+
+    describe("properly repay a loan", async () => {
+      it("throws when there is not enough funds ");
+
+      it("paid back a part of amount, and the loan is still here", async () => {
+        await dai.mint(defi.address, stakingAmount);
+
+        // Create loan
+        await defi.createLoan(
+          deployer.address,
+          stakingAmount,
+          365,
+          10,
+          dai.address
+        );
+
+        // Redeem loan
+        await defi.redeemLoan(0);
+
+        await network.provider.send("evm_increaseTime", [31536000]);
+        await network.provider.send("evm_mine", []);
+
+        // Repay initial amount and the loan is still there 👺
+        await defi.repayLoan(0, ethers.utils.parseEther("9000"));
+
+        // Get loan
+        const { amountRepaid } = await defi.getLoan(deployer.address, 0);
+
+        const cumulativeInterest = await defi.calculateInterest(
+          deployer.address,
+          0
+        );
+
+        const difference = cumulativeInterest.sub(amountRepaid);
+
+        assert.equal(difference.eq(ethers.utils.parseEther("2000")), true);
+      });
+    });
+  });
+
+  describe("emergency functions", async () => {
+    it("owner can withdraw erc20 tokens", async () => {});
+
+    it("not owner can't withdraw erc20 tokens", async () => {});
+
+    it("owner can withdraw ethers", async () => {});
+
+    it("not owner can't withdraw ethers", async () => {});
   });
 });

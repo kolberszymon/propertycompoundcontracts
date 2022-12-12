@@ -1,7 +1,5 @@
 const { ethers } = require("hardhat");
 
-const allowedTokens = ["0xF2d68898557cCb2Cf4C10c3Ef2B034b2a69DAD00"];
-
 async function main() {
   let [deployer] = await ethers.getSigners();
 

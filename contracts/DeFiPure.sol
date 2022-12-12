@@ -2,9 +2,8 @@
 pragma solidity ^0.8.9;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Context.sol";
 import "@openzeppelin/contracts/interfaces/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
 error DeFiProtocol__NotEnoughQuantity();
 error DeFiProtocol__TokenNotSupported();
@@ -12,9 +11,9 @@ error DeFiProtocol__NotSufficientBalance();
 error DeFiProtocol__TransferFromFailure();
 error DeFiProtocol__StakingStillLocked();
 
-// Change to be clean loan
-
 contract DeFiPure is Ownable {
+  using SafeMath for uint256;
+
   struct Investment {
     address staker;
     uint256 amount;
@@ -23,6 +22,7 @@ contract DeFiPure is Ownable {
     uint256 duration;
     uint256 interest;
     uint256 paidBack;
+    uint256 index;
   }
 
   struct Loan {
@@ -32,21 +32,22 @@ contract DeFiPure is Ownable {
     uint256 duration;
     uint256 interestRate;
     uint256 amountRepaid;
-    uint256 availableToBorrow;
+    address borrowedToken;
+    bool started;
+    uint256 index;
   }
 
   struct AvailableInvestment {
     address tokenAddress;
     uint256 duration;
     uint256 interestRate;
+    uint256 index;
   }
 
-  mapping(address => bool) public isTokenAllowed;
-  mapping(address => Investment[]) public stakers;
-  mapping(uint256 => address) public tokenIdToAddress;
+  mapping(address => Investment[]) public investments;
   mapping(address => Loan[]) public loans;
 
-  AvailableInvestment[] private allowedInvestments;
+  AvailableInvestment[] private availableInvestments;
 
   event Stake(
     address indexed stakerAddress,
@@ -54,8 +55,7 @@ contract DeFiPure is Ownable {
     address stakedToken,
     uint256 startDate
   );
-  event Redeem();
-  event Borrow();
+  event Redeem(address indexed stakerAddress, uint256 indexed investmentIndex);
 
   // Modifier to check token allowance
   modifier checkAllowance(uint256 amount, address token) {
@@ -67,8 +67,8 @@ contract DeFiPure is Ownable {
     _;
   }
 
-  modifier checkIfTokenIsAllowed(address token) {
-    require(isTokenAllowed[token], "Token not allowed");
+  modifier checkIfInvestmentExist(uint256 _index) {
+    require(_index < availableInvestments.length, "Investment doesn't exist");
     _;
   }
 
@@ -80,13 +80,15 @@ contract DeFiPure is Ownable {
 
   function stake(uint256 _amount, uint32 _investmentIndex)
     external
-    checkIfTokenIsAllowed(allowedInvestments[_investmentIndex].tokenAddress)
-    checkAllowance(_amount, allowedInvestments[_investmentIndex].tokenAddress)
+    checkIfInvestmentExist(_investmentIndex)
+    checkAllowance(_amount, availableInvestments[_investmentIndex].tokenAddress)
   {
     address from = msg.sender;
-    address _token = allowedInvestments[_investmentIndex].tokenAddress;
-    uint256 _duration = allowedInvestments[_investmentIndex].duration;
-    uint256 _interestRate = allowedInvestments[_investmentIndex].interestRate;
+    address _token = availableInvestments[_investmentIndex].tokenAddress;
+    uint256 _duration = availableInvestments[_investmentIndex].duration;
+    uint256 _interestRate = availableInvestments[_investmentIndex].interestRate;
+
+    require(_token != address(0), "Investment was deleted");
 
     if (_amount <= 0) {
       revert DeFiProtocol__NotEnoughQuantity();
@@ -100,7 +102,9 @@ contract DeFiPure is Ownable {
       revert DeFiProtocol__TransferFromFailure();
     }
 
-    stakers[from].push(
+    // We need index in the struct in order to properly stake from frontend
+    // since deleting only replace the struct with all default values
+    investments[from].push(
       Investment(
         from,
         _amount,
@@ -108,7 +112,8 @@ contract DeFiPure is Ownable {
         block.timestamp,
         _duration,
         _interestRate,
-        0
+        0,
+        investments[from].length
       )
     );
 
@@ -116,62 +121,46 @@ contract DeFiPure is Ownable {
   }
 
   function redeemStake(uint256 _index) external returns (bool) {
-    Investment memory staker = stakers[msg.sender][_index];
+    Investment memory investment = investments[msg.sender][_index];
 
     // 1. If the staking is still locked, revert
     require(
-      block.timestamp >= staker.startDate + staker.duration * 1 days &&
-        staker.startDate != 0,
-      "Staking is still locked"
+      block.timestamp >= investment.startDate + investment.duration * 1 days &&
+        investment.startDate != 0,
+      "Investment is still locked"
     );
 
-    uint256 rewardAmount = ((staker.amount * (100 + staker.interest)) / 100) -
-      staker.paidBack;
+    uint256 rewardAmount = ((investment.amount * (100 + investment.interest)) /
+      100) - investment.paidBack;
 
     // 2. Check if staked token is available
+    uint256 _availableBalance = IERC20(investment.stakedToken).balanceOf(
+      address(this)
+    );
 
-    // 2a. If yes pay out the same token
-    if (IERC20(staker.stakedToken).balanceOf(address(this)) >= rewardAmount) {
-      delete stakers[msg.sender][_index];
+    require(
+      _availableBalance > 0,
+      "There is no tokens for now, come back later"
+    );
 
-      IERC20(staker.stakedToken).transfer(staker.staker, rewardAmount);
+    if (_availableBalance >= rewardAmount) {
+      delete investments[msg.sender][_index];
+
+      IERC20(investment.stakedToken).transfer(investment.staker, rewardAmount);
 
       return true;
     } else {
-      // 2b. If no, iterate over an array of allowed token and try to pay out from it
-      for (uint256 i = 0; i < allowedInvestments.length; i++) {
-        uint256 _balance = IERC20(allowedInvestments[i].tokenAddress).balanceOf(
-          address(this)
-        );
+      IERC20(investment.stakedToken).transfer(
+        investment.staker,
+        _availableBalance
+      );
 
-        if (_balance == 0) {
-          continue;
-        }
-
-        rewardAmount =
-          ((staker.amount * (100 + staker.interest)) / 100) -
-          staker.paidBack;
-
-        if (_balance >= rewardAmount) {
-          delete stakers[msg.sender][_index];
-
-          IERC20(allowedInvestments[i].tokenAddress).transfer(
-            staker.staker,
-            rewardAmount
-          );
-
-          return true;
-        } else {
-          staker.paidBack += _balance;
-
-          IERC20(allowedInvestments[i].tokenAddress).transfer(
-            staker.staker,
-            _balance
-          );
-        }
-      }
+      investment.paidBack += _availableBalance;
     }
-    stakers[msg.sender][_index] = staker;
+    investments[msg.sender][_index] = investment;
+
+    emit Redeem(investment.staker, investment.index);
+
     return false;
   }
 
@@ -182,100 +171,68 @@ contract DeFiPure is Ownable {
   // After all formality owner / admin can create a Loan,
   // so somebody will be able to redeem it
   function createLoan(
-    uint256 _amount,
     address _borrower,
+    uint256 _amount,
     uint32 _durationInDays,
-    uint32 _lendingRate
+    uint32 _interestRate,
+    address _borrowedToken
   ) external onlyOwner {
+    require((_amount / 10000) * 10000 == _amount, "Amount too small");
+
     Loan memory loan = Loan(
       _borrower,
       _amount,
-      block.timestamp,
+      0, // start date
       _durationInDays,
-      _lendingRate,
-      0,
-      _amount
+      _interestRate,
+      0, // amountRepaid
+      _borrowedToken, // we choose it at when creating a loan
+      false, // started
+      loans[_borrower].length
     );
 
     loans[_borrower].push(loan);
   }
 
-  function redeemLoan(
-    uint32 _loanIndex,
-    address _preferableToken,
-    uint256 _amount
-  ) external checkIfTokenIsAllowed(_preferableToken) returns (bool) {
+  function redeemLoan(uint32 _loanIndex) external returns (bool) {
     Loan memory loan = loans[msg.sender][_loanIndex];
 
     require(
-      loan.startDate != 0 && loan.availableToBorrow > 0,
-      "Loan does not exist, or it had already been redeemed"
+      loan.startDate == 0 && loan.started == false,
+      "Loan had already been redeemed"
     );
 
-    uint256 amountToWithdraw = _amount;
+    address _borrowedToken = loan.borrowedToken;
+    uint256 amountToWithdraw = loan.amount;
+    uint256 availableBalance = IERC20(_borrowedToken).balanceOf(address(this));
 
-    // It ensures that _amount will be in proper range, i.e. 0 < _amount < availableToBorrow
-    if (_amount == 0 || _amount >= loan.availableToBorrow) {
-      amountToWithdraw = loan.availableToBorrow;
-    }
+    require(
+      availableBalance >= amountToWithdraw,
+      "Sorry, right now there is no enough funds, try again later"
+    );
 
     // 2a. If yes pay out the same token
-    if (IERC20(_preferableToken).balanceOf(address(this)) >= amountToWithdraw) {
-      loan.availableToBorrow -= amountToWithdraw;
-      loans[msg.sender][_loanIndex] = loan;
 
-      IERC20(_preferableToken).transfer(msg.sender, amountToWithdraw);
+    loan.started = true;
+    loan.startDate = block.timestamp;
 
-      return true;
-    } else {
-      // 2b. If no, iterate over an array of allowed token and try to pay out from it
-      for (uint256 i = 0; i < allowedInvestments.length; i++) {
-        uint256 _balance = IERC20(allowedInvestments[i].tokenAddress).balanceOf(
-          address(this)
-        );
+    loans[msg.sender][_loanIndex] = loan;
 
-        if (_balance == 0) {
-          continue;
-        }
+    IERC20(_borrowedToken).transfer(msg.sender, amountToWithdraw);
 
-        if (_balance >= amountToWithdraw) {
-          loan.availableToBorrow -= amountToWithdraw;
-          loans[msg.sender][_loanIndex] = loan;
-
-          IERC20(allowedInvestments[i].tokenAddress).transfer(
-            msg.sender,
-            amountToWithdraw
-          );
-
-          return true;
-        } else {
-          loan.availableToBorrow -= _balance;
-          loans[msg.sender][_loanIndex] = loan;
-
-          IERC20(allowedInvestments[i].tokenAddress).transfer(
-            msg.sender,
-            _balance
-          );
-        }
-      }
-    }
-
-    return false;
+    return true;
   }
 
-  function repayLoan(
-    uint256 _index,
-    address _token,
-    uint256 _amount
-  ) external checkIfTokenIsAllowed(_token) checkAllowance(_amount, _token) {
+  function repayLoan(uint256 _index, uint256 _amount) external {
     Loan memory loan = loans[msg.sender][_index];
 
-    bool success = IERC20(_token).transferFrom(
+    bool success = IERC20(loan.borrowedToken).transferFrom(
       msg.sender,
       address(this),
       _amount
     );
 
+    // It should throw also if there is not enough allowance
     if (!success) {
       revert DeFiProtocol__TransferFromFailure();
     }
@@ -312,49 +269,26 @@ contract DeFiPure is Ownable {
     require(sent, "Failed to send ether");
   }
 
-  fallback() external payable {}
-
-  function removeFromArray(address _token) internal {
-    AvailableInvestment[] memory _allowedInvestments = allowedInvestments;
-
-    for (uint256 i = 0; i < _allowedInvestments.length - 1; i++) {
-      if (_allowedInvestments[i].tokenAddress == _token) {
-        _allowedInvestments[i] = _allowedInvestments[
-          _allowedInvestments.length - 1
-        ];
-        delete _allowedInvestments[_allowedInvestments.length - 1];
-      }
-    }
-
-    delete allowedInvestments;
-
-    for (uint256 i = 0; i < _allowedInvestments.length - 1; i++) {
-      allowedInvestments.push(_allowedInvestments[i]);
-    }
-  }
-
-  function addAllowedInvestment(
+  function addAvailableInvestment(
     address _token,
     uint256 _durationInDays,
     uint256 _interestRate
   ) external onlyOwner {
-    require(!isTokenAllowed[_token], "Token is already allowed");
-    isTokenAllowed[_token] = true;
-    allowedInvestments.push(
-      AvailableInvestment(_token, _durationInDays, _interestRate)
+    availableInvestments.push(
+      AvailableInvestment(
+        _token,
+        _durationInDays,
+        _interestRate,
+        availableInvestments.length
+      )
     );
   }
 
-  function removeAllowedToken(uint256 _investmentIndex) external onlyOwner {
-    AvailableInvestment memory availableInvestment = allowedInvestments[
-      _investmentIndex
-    ];
-    require(
-      isTokenAllowed[availableInvestment.tokenAddress],
-      "Chill... Token is not allowed anyway"
-    );
-    isTokenAllowed[availableInvestment.tokenAddress] = false;
-    removeFromArray(availableInvestment.tokenAddress);
+  function removeAvailableInvestment(uint256 _investmentIndex)
+    external
+    onlyOwner
+  {
+    delete availableInvestments[_investmentIndex];
   }
 
   function getAllInvestmentsByAddress(address _of)
@@ -362,7 +296,7 @@ contract DeFiPure is Ownable {
     view
     returns (Investment[] memory)
   {
-    return stakers[_of];
+    return investments[_of];
   }
 
   function calculateReward(uint256 _interest, uint256 _timeDifference)
@@ -372,8 +306,8 @@ contract DeFiPure is Ownable {
   {
     // Calculate interest per second
 
-    uint256 secondsInYear = 31536000;
-    uint256 returnsPerSecond = _interest / secondsInYear;
+    // There can be different timeDiffernces in the future
+    uint256 returnsPerSecond = _interest / _timeDifference;
 
     return _timeDifference * returnsPerSecond;
   }
@@ -383,7 +317,7 @@ contract DeFiPure is Ownable {
     view
     returns (uint256)
   {
-    Investment memory staker = stakers[_of][_index];
+    Investment memory staker = investments[_of][_index];
     uint256 timeDifference = block.timestamp - staker.startDate;
 
     return calculateReward(staker.interest, timeDifference);
@@ -394,28 +328,38 @@ contract DeFiPure is Ownable {
     view
     returns (Investment memory)
   {
-    return stakers[_address][_index];
+    return investments[_address][_index];
+  }
+
+  function getLoan(address _of, uint256 _index)
+    external
+    view
+    returns (Loan memory)
+  {
+    return loans[_of][_index];
   }
 
   function calculateInterest(address _address, uint256 _index)
-    internal
+    public
     view
     returns (uint256)
   {
     Loan memory loan = loans[_address][_index];
-    uint256 timeDifference = block.timestamp - loan.startDate;
 
-    uint256 secondsInYear = 31536000;
+    uint256 timeDifferenceInDays = (block.timestamp - loan.startDate) /
+      60 /
+      60 /
+      24;
 
-    // set the minimum calculated interest to yearly,
-    // If it's greater the interest will be also
-    if (timeDifference < secondsInYear) {
-      timeDifference = secondsInYear;
+    // In order to prevent repayments in 10 seconds for 0.0001%
+    if (timeDifferenceInDays < loan.duration) {
+      timeDifferenceInDays = loan.duration;
     }
 
-    uint256 interestPerSecond = loan.interestRate / secondsInYear;
+    uint256 cumulativeInterest = (loan.interestRate * timeDifferenceInDays) /
+      loan.duration;
 
-    return (loan.amount * (100 + (interestPerSecond * timeDifference))) / 100;
+    return (loan.amount * (100 + (cumulativeInterest))) / 100;
   }
 
   function getAvailableInvestments()
@@ -423,6 +367,10 @@ contract DeFiPure is Ownable {
     view
     returns (AvailableInvestment[] memory)
   {
-    return allowedInvestments;
+    return availableInvestments;
   }
+
+  fallback() external payable {}
+
+  receive() external payable {}
 }
