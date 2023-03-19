@@ -16,7 +16,10 @@ describe("Defi", async function () {
     [deployer, notOwner] = await ethers.getSigners();
 
     // Creating DeFi contract
-    const DEFI = await ethers.getContractFactory("DeFiPure", deployer);
+    const DEFI = await ethers.getContractFactory(
+      "PropertyCompoundV1",
+      deployer
+    );
     defi = await DEFI.deploy();
     await defi.deployed();
     defi.connect(deployer);
@@ -32,26 +35,20 @@ describe("Defi", async function () {
     usdt = await DAI.deploy();
     await usdt.deployed();
 
-    await defi.addAvailableInvestment(dai.address, 365, 10);
+    await defi.setAvailableInvestment(dai.address, 365, 10);
     await dai.approve(defi.address, stakingAmount);
   });
 
   describe("staking", async function () {
-    it("doesn't allow for staking not existent investment", async function () {
-      await expect(defi.stake(stakingAmount, 2)).to.be.revertedWith(
-        "Investment doesn't exist"
-      );
-    });
-
     it("reverts not enough allowance", async () => {
-      await defi.addAvailableInvestment(usdt.address, 365, 16);
-      await expect(defi.stake(100000, 1)).to.be.revertedWith(
+      await defi.setAvailableInvestment(usdt.address, 365, 16);
+      await expect(defi.stake(stakingAmount)).to.be.revertedWith(
         "Not enough allowance"
       );
     });
 
     it("can stake", async () => {
-      await defi.stake(stakingAmount, 0);
+      await defi.stake(stakingAmount);
       const balance = await dai.balanceOf(defi.address);
       const { staker, amount } = await defi.investments(deployer.address, 0);
 
@@ -61,7 +58,7 @@ describe("Defi", async function () {
     });
 
     it("revert redeemStake before the time is up", async () => {
-      await defi.stake(stakingAmount, 0);
+      await defi.stake(stakingAmount);
       await expect(defi.redeemStake(0)).to.be.revertedWith(
         "Investment is still locked"
       );
@@ -76,7 +73,7 @@ describe("Defi", async function () {
       const initialBalance = await dai.balanceOf(notOwner.address);
 
       // Stake
-      await defi.connect(notOwner).stake(stakingAmount, 0);
+      await defi.connect(notOwner).stake(stakingAmount);
 
       // Mint, so there will be enough funds in defi
       await dai.mint(defi.address, 10000);

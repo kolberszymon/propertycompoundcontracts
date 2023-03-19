@@ -7,7 +7,7 @@ contract USDT is ERC20 {
   constructor() ERC20("USDT", "USDT") {}
 
   function mint(address _to, uint256 _number) external {
-    _mint(_to, 10**18 * _number);
+    _mint(_to, 10**6 * _number);
   }
 
   function decimals() public view virtual override returns (uint8) {
